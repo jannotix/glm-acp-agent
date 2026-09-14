@@ -337,6 +337,103 @@ test("write_file cancelled by user marks call failed", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// edit_file
+// ---------------------------------------------------------------------------
+
+test("edit_file replaces a unique snippet and goes through the permission flow", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-success-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "const a = 1;\nconst b = 2;\n", "utf8");
+  const conn = createConnectionStub({ permission: "allow" });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "const b = 2;", new_text: "const b = 3;" })
+    );
+    assert.match(result.content, /edited successfully/);
+    assert.equal(readFileSync(path, "utf8"), "const a = 1;\nconst b = 3;\n");
+
+    assert.equal(conn.permissionRequests.length, 1);
+    const sequence = conn.updates.map((u) => ({
+      type: (u.update as { sessionUpdate: string }).sessionUpdate,
+      status: (u.update as { status?: string }).status,
+    }));
+    assert.deepEqual(sequence, [
+      { type: "tool_call", status: "pending" },
+      { type: "tool_call_update", status: "in_progress" },
+      { type: "tool_call_update", status: "completed" },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file fails fast when old_text is absent, without requesting permission", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-missing-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "hello", "utf8");
+  const conn = createConnectionStub();
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "nope", new_text: "x" })
+    );
+    assert.match(result.content, /was not found/);
+    assert.equal(readFileSync(path, "utf8"), "hello");
+    assert.equal(conn.permissionRequests.length, 0);
+    const last = conn.updates.at(-1) as { update: { status?: string } };
+    assert.equal(last.update.status, "failed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file refuses ambiguous old_text matches", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-ambiguous-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "return 1;\nreturn 1;\n", "utf8");
+  const conn = createConnectionStub();
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "return 1;", new_text: "return 2;" })
+    );
+    assert.match(result.content, /occurs 2 times/);
+    assert.equal(readFileSync(path, "utf8"), "return 1;\nreturn 1;\n");
+    assert.equal(conn.permissionRequests.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file rejected by user leaves the file untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-reject-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "before", "utf8");
+  const conn = createConnectionStub({ permission: "reject" });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "before", new_text: "after" })
+    );
+    assert.match(result.content, /rejected by user/i);
+    assert.equal(readFileSync(path, "utf8"), "before");
+    const last = conn.updates.at(-1) as { update: { status?: string } };
+    assert.equal(last.update.status, "failed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // run_command
 // ---------------------------------------------------------------------------
 

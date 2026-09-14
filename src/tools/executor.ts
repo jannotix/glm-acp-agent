@@ -68,6 +68,8 @@ export class ToolExecutor {
         return this.readFile(toolCallId, args);
       case "write_file":
         return this.writeFile(toolCallId, args);
+      case "edit_file":
+        return this.editFile(toolCallId, args);
       case "list_files":
         return this.listFiles(toolCallId, args);
       case "run_command":
@@ -214,6 +216,114 @@ export class ToolExecutor {
       const message = err instanceof Error ? err.message : String(err);
       await this.markFailed(toolCallId, message);
       return { content: `Error writing file: ${message}` };
+    }
+  }
+
+  private async editFile(
+    toolCallId: string,
+    args: Record<string, unknown>
+  ): Promise<ToolResult> {
+    const path = String(args["path"] ?? "").trim();
+    const oldText = String(args["old_text"] ?? "");
+    const newText = String(args["new_text"] ?? "");
+    if (!path) {
+      return this.failAndReturn(toolCallId, "edit_file", args, "Error: `path` is required.");
+    }
+    if (oldText.length === 0) {
+      return this.failAndReturn(
+        toolCallId,
+        "edit_file",
+        args,
+        "Error: `old_text` is required and must be a non-empty exact snippet from the file."
+      );
+    }
+    const absolutePath = this.resolvePath(path);
+
+    await this.connection.sessionUpdate({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: `Edit file: ${path}`,
+        kind: "edit",
+        status: "pending",
+        locations: [{ path }],
+        rawInput: args,
+      },
+    });
+
+    let current: string;
+    try {
+      current = await readFile(absolutePath, "utf8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.markFailed(toolCallId, message);
+      return { content: `Error editing file: cannot read ${path}: ${message}` };
+    }
+
+    const occurrences = current.split(oldText).length - 1;
+    if (occurrences === 0) {
+      await this.markFailed(toolCallId, "old_text not found in file");
+      return {
+        content: `Error editing file: \`old_text\` was not found in ${path}. Re-read the file and copy the snippet exactly, including whitespace.`,
+      };
+    }
+    if (occurrences > 1) {
+      await this.markFailed(toolCallId, `old_text matches ${occurrences} locations`);
+      return {
+        content: `Error editing file: \`old_text\` occurs ${occurrences} times in ${path}. Add surrounding lines to make it unique, then retry.`,
+      };
+    }
+
+    const permissionResult = await this.maybeRequestPermission({
+      toolCallId,
+      kind: "write",
+      rawInput: args,
+      title: `Edit file: ${path}`,
+      locations: [{ path }],
+    });
+
+    if (permissionResult.type === "error") {
+      const message = `Error requesting permission: ${permissionResult.message}`;
+      await this.markFailed(toolCallId, message);
+      return { content: message };
+    }
+    if (permissionResult.type === "cancelled") {
+      await this.markFailed(toolCallId, "Cancelled by user.");
+      return { content: "Edit cancelled by user." };
+    }
+    if (permissionResult.type === "reject") {
+      await this.markFailed(toolCallId, "Rejected by user.");
+      return { content: "Edit rejected by user." };
+    }
+
+    await this.connection.sessionUpdate({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "in_progress",
+      },
+    });
+
+    try {
+      await writeFile(absolutePath, current.replace(oldText, newText), "utf8");
+
+      await this.connection.sessionUpdate({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "completed",
+          rawOutput: { success: true },
+        },
+      });
+
+      return { content: `File edited successfully: ${path}` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.markFailed(toolCallId, message);
+      return { content: `Error editing file: ${message}` };
     }
   }
 

@@ -238,6 +238,33 @@ test("StdioMcpClient quotes an argument that itself contains spaces", async () =
   await client.dispose();
 });
 
+test("StdioMcpClient preserves an empty-string argument in the cmd.exe line", async () => {
+  const { child } = makeFakeChild();
+  let args: string[] = [];
+  const client = new StdioMcpClient(
+    stdioServer({ command: "npx", args: ["-y", "@example/mcp-docs", "--suffix", ""] }),
+    {
+      platform: "win32",
+      comSpec: "cmd.exe",
+      killProcessTree: () => true,
+      spawn: (_command, capturedArgs) => {
+        args = capturedArgs;
+        return child as never;
+      },
+    }
+  );
+  const listPromise = client.listTools();
+
+  await tick();
+  child.emit("error", new Error("test stop"));
+  await assert.rejects(listPromise, /test stop/i);
+
+  // The empty token must survive as "" rather than vanishing into the join and
+  // shifting the child's positional argv.
+  assert.deepEqual(args, ["/d", "/s", "/c", '"npx -y @example/mcp-docs --suffix """']);
+  await client.dispose();
+});
+
 test("StdioMcpClient spawns a real executable directly on Windows", async () => {
   const { child } = makeFakeChild();
   let command = "";

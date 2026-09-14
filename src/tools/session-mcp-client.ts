@@ -467,8 +467,10 @@ export class StdioMcpClient implements ConnectedMcpClient {
       }
     }
     const comSpec = this.opts.comSpec ?? process.env["ComSpec"] ?? "cmd.exe";
+    // Quote whitespace tokens (cmd.exe must keep them as one argv entry) and empty
+    // tokens (an unquoted "" would vanish in join, shifting the child's argv).
     const line = [command, ...args]
-      .map((token) => (/\s/.test(token) ? `"${token}"` : token))
+      .map((token) => (token.length === 0 || /\s/.test(token) ? `"${token}"` : token))
       .join(" ");
     return {
       command: comSpec,

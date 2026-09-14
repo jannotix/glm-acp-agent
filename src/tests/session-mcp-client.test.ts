@@ -188,8 +188,36 @@ test("StdioMcpClient launches a .cmd shim through cmd.exe on Windows", async () 
 test("StdioMcpClient quotes a spaced .cmd path so cmd.exe keeps it intact", async () => {
   const { child } = makeFakeChild();
   let args: string[] = [];
+  let verbatim = false;
   const client = new StdioMcpClient(
     stdioServer({ command: "C:\\Program Files\\nodejs\\npx.cmd", args: ["-y", "@example/mcp-docs"] }),
+    {
+      platform: "win32",
+      comSpec: "cmd.exe",
+      killProcessTree: () => true,
+      spawn: (_command, capturedArgs, options) => {
+        args = capturedArgs;
+        verbatim = options.windowsVerbatimArguments === true;
+        return child as never;
+      },
+    }
+  );
+  const listPromise = client.listTools();
+
+  await tick();
+  child.emit("error", new Error("test stop"));
+  await assert.rejects(listPromise, /test stop/i);
+
+  assert.deepEqual(args, ["/d", "/s", "/c", '""C:\\Program Files\\nodejs\\npx.cmd" -y @example/mcp-docs"']);
+  assert.equal(verbatim, true);
+  await client.dispose();
+});
+
+test("StdioMcpClient quotes an argument that itself contains spaces", async () => {
+  const { child } = makeFakeChild();
+  let args: string[] = [];
+  const client = new StdioMcpClient(
+    stdioServer({ command: "npx", args: ["-y", "@example/mcp-docs", "--prompt", "hello world"] }),
     {
       platform: "win32",
       comSpec: "cmd.exe",
@@ -206,7 +234,7 @@ test("StdioMcpClient quotes a spaced .cmd path so cmd.exe keeps it intact", asyn
   child.emit("error", new Error("test stop"));
   await assert.rejects(listPromise, /test stop/i);
 
-  assert.deepEqual(args, ["/d", "/s", "/c", '""C:\\Program Files\\nodejs\\npx.cmd" -y @example/mcp-docs"']);
+  assert.deepEqual(args, ["/d", "/s", "/c", '"npx -y @example/mcp-docs --prompt "hello world""']);
   await client.dispose();
 });
 

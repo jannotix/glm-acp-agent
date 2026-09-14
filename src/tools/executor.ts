@@ -199,7 +199,7 @@ export class ToolExecutor {
     });
 
     try {
-      await writeFile(absolutePath, content, "utf8");
+      await this.performWrite(absolutePath, content);
 
       await this.connection.sessionUpdate({
         sessionId: this.sessionId,
@@ -217,6 +217,20 @@ export class ToolExecutor {
       await this.markFailed(toolCallId, message);
       return { content: `Error writing file: ${message}` };
     }
+  }
+
+  /**
+   * Route the actual write through the ACP client when it advertises
+   * `fs.writeTextFile` (e.g. Zed), so edits land in the client's buffer and
+   * render as native editor diffs. Fall back to writing from the agent process
+   * when the client has no fs capability.
+   */
+  private async performWrite(path: string, content: string): Promise<void> {
+    if (this.clientCapabilities?.fs?.writeTextFile) {
+      await this.connection.writeTextFile({ sessionId: this.sessionId, path, content });
+      return;
+    }
+    await writeFile(path, content, "utf8");
   }
 
   private async editFile(
@@ -307,7 +321,7 @@ export class ToolExecutor {
     });
 
     try {
-      await writeFile(absolutePath, current.replace(oldText, newText), "utf8");
+      await this.performWrite(absolutePath, current.replace(oldText, newText));
 
       await this.connection.sessionUpdate({
         sessionId: this.sessionId,

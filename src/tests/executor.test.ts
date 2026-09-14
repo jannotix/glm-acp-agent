@@ -25,11 +25,13 @@ function createConnectionStub(opts: {
   const updates: Array<Record<string, unknown>> = [];
   const permissionRequests: Array<unknown> = [];
   const terminalCalls: Array<{ command: string; args?: string[] }> = [];
+  const writeTextFileCalls: Array<{ sessionId: string; path: string; content: string }> = [];
 
   return {
     updates,
     permissionRequests,
     terminalCalls,
+    writeTextFileCalls,
     async sessionUpdate(payload: Record<string, unknown>) {
       updates.push(payload);
     },
@@ -39,8 +41,9 @@ function createConnectionStub(opts: {
       return { content: "hello" };
     },
     async writeTextFile(params: { sessionId: string; path: string; content: string }) {
-      void params;
+      writeTextFileCalls.push(params);
       if (opts.writeError) throw new Error("permission denied");
+      writeFileSync(params.path, params.content, "utf8");
     },
     async createTerminal(params: { command: string; args?: string[] }): Promise<StubTerminal> {
       terminalCalls.push(params);
@@ -206,6 +209,29 @@ test("write_file writes from the agent process without fs.writeTextFile capabili
     );
     assert.match(result.content, /written successfully/);
     assert.equal(readFileSync(path, "utf8"), "hi");
+    assert.equal(conn.writeTextFileCalls.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_file routes through fs.writeTextFile when the client advertises it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-write-client-"));
+  const path = join(dir, "out.txt");
+  const conn = createConnectionStub({ permission: "allow" });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "write_file",
+      JSON.stringify({ path, content: "via client" })
+    );
+    assert.match(result.content, /written successfully/);
+    assert.equal(readFileSync(path, "utf8"), "via client");
+    assert.deepEqual(
+      conn.writeTextFileCalls.map((c) => ({ path: c.path, content: c.content })),
+      [{ path, content: "via client" }]
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -354,6 +380,10 @@ test("edit_file replaces a unique snippet and goes through the permission flow",
     );
     assert.match(result.content, /edited successfully/);
     assert.equal(readFileSync(path, "utf8"), "const a = 1;\nconst b = 3;\n");
+    assert.deepEqual(
+      conn.writeTextFileCalls.map((c) => ({ path: c.path, content: c.content })),
+      [{ path, content: "const a = 1;\nconst b = 3;\n" }]
+    );
 
     assert.equal(conn.permissionRequests.length, 1);
     const sequence = conn.updates.map((u) => ({

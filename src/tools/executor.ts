@@ -234,13 +234,18 @@ export class ToolExecutor {
   }
 
   /**
-   * Mirror of performWrite for reads: when the client advertises
-   * `fs.readTextFile`, read through the client so edits are computed against
-   * the same contents the user sees (a dirty editor buffer), not potentially
-   * stale disk. Fall back to reading from the agent process.
+   * Mirror of performWrite for reads, used by edit_file: when the client
+   * advertises BOTH `fs.readTextFile` and `fs.writeTextFile`, read through the
+   * client so the edit is computed against the same contents the user sees (a
+   * dirty editor buffer). Reading a client buffer we cannot write back would
+   * leave the editor showing stale content while disk diverges, so a
+   * read-without-write capability falls back to plain agent-process disk I/O.
    */
   private async performRead(path: string): Promise<string> {
-    if (this.clientCapabilities?.fs?.readTextFile) {
+    if (
+      this.clientCapabilities?.fs?.readTextFile &&
+      this.clientCapabilities?.fs?.writeTextFile
+    ) {
       const response = await this.connection.readTextFile({ sessionId: this.sessionId, path });
       return response.content;
     }
@@ -325,6 +330,29 @@ export class ToolExecutor {
       return { content: "Edit rejected by user." };
     }
 
+    // The permission prompt can sit in front of the user for a while; re-read
+    // and re-validate so a buffer edited while deciding is not silently
+    // overwritten by this stale snapshot.
+    let latest: string;
+    try {
+      latest = await this.performRead(absolutePath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.markFailed(toolCallId, message);
+      return { content: `Error editing file: cannot re-read ${path}: ${message}` };
+    }
+    const latestOccurrences = latest.split(oldText).length - 1;
+    if (latestOccurrences !== 1) {
+      const reason =
+        latestOccurrences === 0
+          ? "`old_text` is no longer present"
+          : `\`old_text\` now occurs ${latestOccurrences} times`;
+      await this.markFailed(toolCallId, `file changed while waiting for permission (${reason})`);
+      return {
+        content: `Error editing file: ${path} changed while waiting for permission (${reason}). Re-read the file and retry.`,
+      };
+    }
+
     await this.connection.sessionUpdate({
       sessionId: this.sessionId,
       update: {
@@ -335,7 +363,7 @@ export class ToolExecutor {
     });
 
     try {
-      await this.performWrite(absolutePath, current.replace(oldText, newText));
+      await this.performWrite(absolutePath, latest.replace(oldText, newText));
 
       await this.connection.sessionUpdate({
         sessionId: this.sessionId,

@@ -23,22 +23,27 @@ function createConnectionStub(opts: {
   terminalOutput?: string;
   /** When set, client readTextFile returns this instead of the on-disk content (simulates a dirty buffer). */
   clientFileContent?: string;
+  /** Called when a permission request arrives — use it to mutate files mid-prompt. */
+  onPermission?: () => void;
 } = {}) {
   const updates: Array<Record<string, unknown>> = [];
   const permissionRequests: Array<unknown> = [];
   const terminalCalls: Array<{ command: string; args?: string[] }> = [];
   const writeTextFileCalls: Array<{ sessionId: string; path: string; content: string }> = [];
+  const readTextFileCalls: Array<{ sessionId: string; path: string }> = [];
 
   return {
     updates,
     permissionRequests,
     terminalCalls,
     writeTextFileCalls,
+    readTextFileCalls,
     async sessionUpdate(payload: Record<string, unknown>) {
       updates.push(payload);
     },
     async readTextFile(params: { sessionId: string; path: string }) {
       if (opts.readError) throw new Error("file not found");
+      readTextFileCalls.push(params);
       if (opts.clientFileContent !== undefined) return { content: opts.clientFileContent };
       // Mirror a real client: readTextFile serves the file's current on-disk contents.
       return { content: readFileSync(params.path, "utf8") };
@@ -65,6 +70,7 @@ function createConnectionStub(opts: {
     },
     async requestPermission(params: unknown) {
       permissionRequests.push(params);
+      if (opts.onPermission) opts.onPermission();
       switch (opts.permission ?? "allow") {
         case "allow":
           return { outcome: { outcome: "selected", optionId: "allow" } };
@@ -490,12 +496,13 @@ test("edit_file computes the edit against the client's buffer, not stale disk", 
   }
 });
 
-test("edit_file falls back to agent-process disk write without the writeTextFile capability", async () => {
+test("edit_file falls back to agent-process disk I/O without the writeTextFile capability", async () => {
   const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-disk-fallback-"));
   const path = join(dir, "code.txt");
   writeFileSync(path, "alpha beta\n", "utf8");
+  // readTextFile advertised but writeTextFile not: a client buffer we cannot
+  // write back must not be the edit source either, so this stays disk↔disk.
   const conn = createConnectionStub({ permission: "allow" });
-  // readTextFile advertised, writeTextFile not: read via client, write on disk.
   const exec = new ToolExecutor(conn as never, "s1", { fs: { readTextFile: true } });
   try {
     const result = await exec.execute(
@@ -506,6 +513,34 @@ test("edit_file falls back to agent-process disk write without the writeTextFile
     assert.match(result.content, /edited successfully/);
     assert.equal(readFileSync(path, "utf8"), "alpha gamma\n");
     assert.equal(conn.writeTextFileCalls.length, 0);
+    assert.equal(conn.readTextFileCalls.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file re-validates after the permission prompt and refuses a file changed underfoot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-stale-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "keep\nold snippet\n", "utf8");
+  const conn = createConnectionStub({
+    permission: "allow",
+    // The user edits the buffer while the permission prompt is up.
+    onPermission: () => writeFileSync(path, "keep\nuser rewrote this\n", "utf8"),
+  });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "old snippet", new_text: "new snippet" })
+    );
+    assert.match(result.content, /changed while waiting for permission/);
+    // The user's concurrent edit is intact and nothing was written back.
+    assert.equal(readFileSync(path, "utf8"), "keep\nuser rewrote this\n");
+    assert.equal(conn.writeTextFileCalls.length, 0);
+    const last = conn.updates.at(-1) as { update: { status?: string } };
+    assert.equal(last.update.status, "failed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

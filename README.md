@@ -53,7 +53,8 @@ ACP Client (IDE plugin, CLI, …)
         ├─ GlmClient   ← Z.AI / Zhipu AI Coding Plan Chat Completions  (src/llm/)
         │
         ├─ ToolExecutor ← executes tool calls  (src/tools/)
-        │    ├─ read_file / write_file       → Agent process (Node fs)
+        │    ├─ read_file / list_files        → Agent process (Node fs)
+        │    ├─ write_file / edit_file        → ACP client fs when advertised (editor-buffer diffs), else Agent process (Node fs)
         │    ├─ list_files / run_command     → Agent process (Node fs / child_process)
         │    ├─ web_search / web_reader      → Z.AI Coding Plan Web MCP (HTTP)
         │    └─ image_analysis               → Z.AI Coding Plan Vision MCP (stdio)
@@ -70,8 +71,8 @@ The agent process needs network access to `api.z.ai` for chat completions and We
 | Tool | Runs on | Permission behavior | Description |
 |------|---------|---------------------|-------------|
 | `read_file` | Agent process | Always silent | Read the text content of a file |
-| `write_file` | Agent process | Mode-dependent | Write or overwrite a text file. Silent in `accept_edits` and `bypass_permissions`. |
-| `edit_file` | Agent process | Mode-dependent | Replace one exact, unique snippet in an existing file — a surgical edit instead of a full rewrite. Silent in `accept_edits` and `bypass_permissions`. |
+| `write_file` | Agent process (ACP client `fs` when advertised) | Mode-dependent | Write or overwrite a text file. Silent in `accept_edits` and `bypass_permissions`. |
+| `edit_file` | Agent process (ACP client `fs` when advertised) | Mode-dependent | Replace one exact, unique snippet in an existing file — a surgical edit instead of a full rewrite. Re-reads and re-validates after the permission prompt so concurrent edits are not overwritten. Silent in `accept_edits` and `bypass_permissions`. |
 | `list_files` | Agent process | Always silent | List a directory using Node filesystem APIs |
 | `run_command` | Agent process | Mode-dependent | Run an arbitrary shell command. Silent only in `bypass_permissions`. |
 | `web_search` | Agent (Z.AI Coding Plan MCP) | Always silent | Search the web — returns titles, URLs, and summaries |

@@ -233,6 +233,20 @@ export class ToolExecutor {
     await writeFile(path, content, "utf8");
   }
 
+  /**
+   * Mirror of performWrite for reads: when the client advertises
+   * `fs.readTextFile`, read through the client so edits are computed against
+   * the same contents the user sees (a dirty editor buffer), not potentially
+   * stale disk. Fall back to reading from the agent process.
+   */
+  private async performRead(path: string): Promise<string> {
+    if (this.clientCapabilities?.fs?.readTextFile) {
+      const response = await this.connection.readTextFile({ sessionId: this.sessionId, path });
+      return response.content;
+    }
+    return readFile(path, "utf8");
+  }
+
   private async editFile(
     toolCallId: string,
     args: Record<string, unknown>
@@ -268,7 +282,7 @@ export class ToolExecutor {
 
     let current: string;
     try {
-      current = await readFile(absolutePath, "utf8");
+      current = await this.performRead(absolutePath);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.markFailed(toolCallId, message);

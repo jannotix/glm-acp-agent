@@ -21,6 +21,8 @@ function createConnectionStub(opts: {
   readError?: boolean;
   writeError?: boolean;
   terminalOutput?: string;
+  /** When set, client readTextFile returns this instead of the on-disk content (simulates a dirty buffer). */
+  clientFileContent?: string;
 } = {}) {
   const updates: Array<Record<string, unknown>> = [];
   const permissionRequests: Array<unknown> = [];
@@ -36,9 +38,10 @@ function createConnectionStub(opts: {
       updates.push(payload);
     },
     async readTextFile(params: { sessionId: string; path: string }) {
-      void params;
       if (opts.readError) throw new Error("file not found");
-      return { content: "hello" };
+      if (opts.clientFileContent !== undefined) return { content: opts.clientFileContent };
+      // Mirror a real client: readTextFile serves the file's current on-disk contents.
+      return { content: readFileSync(params.path, "utf8") };
     },
     async writeTextFile(params: { sessionId: string; path: string; content: string }) {
       writeTextFileCalls.push(params);
@@ -456,6 +459,71 @@ test("edit_file rejected by user leaves the file untouched", async () => {
     );
     assert.match(result.content, /rejected by user/i);
     assert.equal(readFileSync(path, "utf8"), "before");
+    const last = conn.updates.at(-1) as { update: { status?: string } };
+    assert.equal(last.update.status, "failed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file computes the edit against the client's buffer, not stale disk", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-client-read-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "const a = 1;\n", "utf8"); // stale disk content
+  // The client's buffer has unsaved edits the agent must build on.
+  const conn = createConnectionStub({ permission: "allow", clientFileContent: "const a = 1;\nconst b = 2;\n" });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "const b = 2;", new_text: "const b = 3;" })
+    );
+    assert.match(result.content, /edited successfully/);
+    // The write went back through the client with the merged content.
+    assert.deepEqual(
+      conn.writeTextFileCalls.map((c) => c.content),
+      ["const a = 1;\nconst b = 3;\n"]
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edit_file falls back to agent-process disk write without the writeTextFile capability", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-edit-disk-fallback-"));
+  const path = join(dir, "code.txt");
+  writeFileSync(path, "alpha beta\n", "utf8");
+  const conn = createConnectionStub({ permission: "allow" });
+  // readTextFile advertised, writeTextFile not: read via client, write on disk.
+  const exec = new ToolExecutor(conn as never, "s1", { fs: { readTextFile: true } });
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "edit_file",
+      JSON.stringify({ path, old_text: "beta", new_text: "gamma" })
+    );
+    assert.match(result.content, /edited successfully/);
+    assert.equal(readFileSync(path, "utf8"), "alpha gamma\n");
+    assert.equal(conn.writeTextFileCalls.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_file surfaces client writeTextFile failures as a failed tool result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "glm-executor-write-client-fail-"));
+  const path = join(dir, "y.txt");
+  const conn = createConnectionStub({ permission: "allow", writeError: true });
+  const exec = new ToolExecutor(conn as never, "s1", FULL_CAPS);
+  try {
+    const result = await exec.execute(
+      "tc1",
+      "write_file",
+      JSON.stringify({ path, content: "data" })
+    );
+    assert.match(result.content, /Error writing file: permission denied/);
+    assert.equal(existsSync(path), false);
     const last = conn.updates.at(-1) as { update: { status?: string } };
     assert.equal(last.update.status, "failed");
   } finally {

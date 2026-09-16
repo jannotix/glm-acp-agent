@@ -886,6 +886,8 @@ export class GlmAcpAgent implements Agent {
       await session.mcpTools?.dispose();
     }
     this.sessions.delete(params.sessionId);
+    // Session is gone from memory; its task list must not linger in the map.
+    this.sessionTodos.delete(params.sessionId);
   }
 
   async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {

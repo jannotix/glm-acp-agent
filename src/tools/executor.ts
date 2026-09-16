@@ -44,14 +44,22 @@ const PREVIEW_STRING_LIMIT = 240;
 const PREVIEW_HEAD = 120;
 
 /**
+ * Elide a single long string for client-facing display (UI cards, read
+ * previews) — never for tool results or permission prompts.
+ */
+function elideStringForPreview(value: string): string {
+  if (value.length <= PREVIEW_STRING_LIMIT) return value;
+  return `${value.slice(0, PREVIEW_HEAD)}… [${value.length} chars]`;
+}
+
+/**
  * Elide long strings in a rawInput/rawOutput payload so client UI cards stay
  * compact (a whole-file write would otherwise render the entire file in chat).
  * The full payload still reaches the model through the tool result channel.
  */
 function elideForPreview(value: unknown): unknown {
   if (typeof value === "string") {
-    if (value.length <= PREVIEW_STRING_LIMIT) return value;
-    return `${value.slice(0, PREVIEW_HEAD)}… [${value.length} chars]`;
+    return elideStringForPreview(value);
   }
   if (Array.isArray(value)) return value.map(elideForPreview);
   if (typeof value === "object" && value !== null) {
@@ -165,12 +173,37 @@ export class ToolExecutor {
     try {
       const full = await readFile(absolutePath, "utf8");
       const lines = full.split("\n");
+      // split() turns a trailing newline into a phantom empty last line; drop
+      // it so the reported line count matches what an editor shows.
+      if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
       const totalLines = lines.length;
-      const start = Math.min(offset, totalLines);
+
+      // Past EOF: report it plainly instead of clamping back into the last
+      // line — clamping made the "next chunk" hint reappear forever.
+      if (offset > totalLines) {
+        const content = `[end of file: offset ${offset} is beyond the last line of ${path} (${totalLines} line${totalLines === 1 ? "" : "s"})]`;
+        await this.connection.sessionUpdate({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "completed",
+            content: [{ type: "content", content: { type: "text", text: content } }],
+            rawOutput: elideForPreview({ content }),
+          },
+        });
+        return { content };
+      }
+
+      const start = offset;
       const end = Math.min(start + limit - 1, totalLines);
       let content = lines.slice(start - 1, end).join("\n");
-      if (start > 1 || end < totalLines) {
+      // Only advertise a next offset while lines remain — a hint on the final
+      // page would send the model back into the EOF branch above on a loop.
+      if (end < totalLines) {
         content += `\n[showing lines ${start}-${end} of ${totalLines}; pass offset=${end + 1} to read the next chunk]`;
+      } else if (start > 1) {
+        content += `\n[showing lines ${start}-${end} of ${totalLines}; end of file]`;
       }
 
       await this.connection.sessionUpdate({
@@ -179,7 +212,9 @@ export class ToolExecutor {
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: "completed",
-          content: [{ type: "content", content: { type: "text", text: content } }],
+          content: [
+            { type: "content", content: { type: "text", text: elideStringForPreview(content) } },
+          ],
           rawOutput: elideForPreview({ content }),
         },
       });
@@ -283,11 +318,13 @@ export class ToolExecutor {
       },
     });
 
-    // Step 2: request user permission based on the current session mode.
+    // Step 2: request user permission based on the current session mode. The
+    // prompt must show the full payload: an approval decides on exactly what
+    // will run, so elision is reserved for sessionUpdate UI cards (step 1).
     const permissionResult = await this.maybeRequestPermission({
       toolCallId,
       kind: "write",
-      rawInput: elideForPreview(args),
+      rawInput: args,
       title: `Write file: ${path}`,
       locations: [{ path }],
     });
@@ -426,10 +463,12 @@ export class ToolExecutor {
       };
     }
 
+    // Full payload in the prompt — the user approves the exact edit (see
+    // writeFile; elision is for sessionUpdate cards only).
     const permissionResult = await this.maybeRequestPermission({
       toolCallId,
       kind: "write",
-      rawInput: elideForPreview(args),
+      rawInput: args,
       title: `Edit file: ${path}`,
       locations: [{ path }],
     });
@@ -591,11 +630,12 @@ export class ToolExecutor {
       },
     });
 
-    // Step 2: request permission based on the current session mode.
+    // Step 2: request permission based on the current session mode. Full
+    // payload again: the approval must see the whole command line.
     const permissionResult = await this.maybeRequestPermission({
       toolCallId,
       kind: "execute",
-      rawInput: elideForPreview(args),
+      rawInput: args,
       title: `Run command: ${command}`,
       locations: [],
     });
@@ -926,7 +966,10 @@ export class ToolExecutor {
           kind: args.kind === "write" ? "edit" : "execute",
           status: "pending",
           locations: args.locations ?? [],
-          rawInput: elideForPreview(args.rawInput),
+          // Passed through verbatim: callers hand us the full payload so the
+          // approval prompt shows exactly what will run. UI-card elision
+          // happens on the sessionUpdate channel, never here.
+          rawInput: args.rawInput,
         },
         options: [
           { kind: "allow_once", name: "Allow", optionId: "allow" },

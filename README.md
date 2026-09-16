@@ -53,16 +53,19 @@ ACP Client (IDE plugin, CLI, …)
         ├─ GlmClient   ← Z.AI / Zhipu AI Coding Plan Chat Completions  (src/llm/)
         │
         ├─ ToolExecutor ← executes tool calls  (src/tools/)
-        │    ├─ read_file / list_files        → Agent process (Node fs)
+        │    ├─ read_file / list_files        → Agent process (Node fs); read_file paginated (offset/limit)
         │    ├─ write_file / edit_file        → ACP client fs when advertised (editor-buffer diffs), else Agent process (Node fs)
         │    ├─ list_files / run_command     → Agent process (Node fs / child_process)
         │    ├─ web_search / web_reader      → Z.AI Coding Plan Web MCP (HTTP)
-        │    └─ image_analysis               → Z.AI Coding Plan Vision MCP (stdio)
+        │    ├─ image_analysis               → Z.AI Coding Plan Vision MCP (stdio)
+        │    └─ todowrite                    → Agent process (per-session task list; replaces chat narration)
         │
         └─ VisionMcpClient ← spawns `npx @z_ai/mcp-server` on demand
 ```
 
-The agent process needs network access to `api.z.ai` for chat completions and Web MCP, plus `npx` available on `PATH` so it can launch `@z_ai/mcp-server` for vision. Filesystem and shell operations run inside the agent process with paths resolved against the ACP session working directory. When the client advertises `fs.writeTextFile` / `fs.readTextFile`, writes and edit-file reads are routed through the ACP client instead, so edits land in the editor buffer and render as native diffs; otherwise the agent process touches the filesystem directly. Writes and arbitrary shell commands still go through ACP `session/request_permission`, so clients can render an approval prompt before the operation runs.
+The agent process needs network access to `api.z.ai` for chat completions and Web MCP, plus `npx` available on `PATH` so it can launch `@z_ai/mcp-server` for vision. Filesystem and shell operations run inside the agent process with paths resolved against the ACP session working directory. When the client advertises `fs.writeTextFile` / `fs.readTextFile`, writes and edit-file reads are routed through the ACP client instead, so edits land in the editor buffer and render as native diffs; otherwise the agent process touches the filesystem directly. Writes and arbitrary shell commands still go through ACP `session/request_permission`, and the permission payload is always the **full** tool arguments — the user approves exactly what will run.
+
+Client-facing tool cards stay compact: long strings in `rawInput`/`rawOutput` (and in the `read_file` content preview) are elided to a short head plus a character count, while the model keeps receiving complete payloads through the tool-result channel. Progress narration lives in the `todowrite` task list rather than prose, and reasoning tokens are only forwarded as `agent_thought_chunk` when `ACP_GLM_STREAM_THINKING` is not `false` (the default preserves streaming).
 
 ---
 
@@ -70,7 +73,7 @@ The agent process needs network access to `api.z.ai` for chat completions and We
 
 | Tool | Runs on | Permission behavior | Description |
 |------|---------|---------------------|-------------|
-| `read_file` | Agent process | Always silent | Read a text file, paginated by offset/limit (default 2000 lines, capped at 5000); the result reports the shown range |
+| `read_file` | Agent process | Always silent | Read a text file, paginated by offset/limit (default 2000 lines, capped at 5000); the result reports the shown range, advertises the next offset only while lines remain, and reports EOF past the last line |
 | `write_file` | Agent process (ACP client `fs` when advertised) | Mode-dependent | Write or overwrite a text file. Silent in `accept_edits` and `bypass_permissions`. |
 | `edit_file` | Agent process (ACP client `fs` when advertised) | Mode-dependent | Replace one exact, unique snippet in an existing file — a surgical edit instead of a full rewrite. Re-reads and re-validates after the permission prompt so concurrent edits are not overwritten. Silent in `accept_edits` and `bypass_permissions`. |
 | `todowrite` | Agent process | Always silent | Create or replace the session's structured task list so multi-step progress is tracked instead of narrated in chat. Each call replaces the list; the tool result renders it back to the model. |

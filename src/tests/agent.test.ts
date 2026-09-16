@@ -814,6 +814,21 @@ test("closeSession removes the session and a subsequent prompt fails", async () 
   );
 });
 
+test("closeSession clears the session's task list", async () => {
+  const conn = createConnectionStub();
+  const agent = new GlmAcpAgent(conn as never, { sessionStore: null });
+  await agent.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+  const { sessionId } = await agent.newSession({ cwd: "/tmp", mcpServers: [] });
+
+  // The executor's setTodos callback stores the list per session; close must
+  // release it along with the live session or the map leaks task arrays for
+  // the lifetime of the agent process.
+  const todos = (agent as unknown as { sessionTodos: Map<string, unknown[]> }).sessionTodos;
+  todos.set(sessionId, [{ content: "stale task", status: "pending" }]);
+  await agent.closeSession({ sessionId });
+  assert.equal(todos.has(sessionId), false);
+});
+
 test("authenticate is a no-op", async () => {
   const conn = createConnectionStub();
   const agent = new GlmAcpAgent(conn as never, { sessionStore: null });
